@@ -8,8 +8,29 @@ import {
 } from '../lib/metrics.js';
 import { withSpan } from '../lib/tracing.js';
 import { rpcPool } from '../lib/rpc-pool.js';
+import { isMockMode } from '../config/mock-mode.js';
+import { mockTransactionHash, type MockAction } from './mock-chain.service.js';
+
+/**
+ * In mock mode (issue #1336) every chain-backed action resolves locally instead
+ * of reaching an RPC endpoint. The surrounding handlers still own all database
+ * writes, event rows and broadcasts, so the sandbox exercises the same code
+ * paths a real deployment does — only the network call is replaced by a
+ * deterministic placeholder hash.
+ */
+function mockActionHash(action: MockAction, streamId: bigint): string {
+  return mockTransactionHash(action, streamId);
+}
 
 const RPC_URL = process.env.SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org';
+
+/**
+ * Ledger height reported by the local mock Soroban RPC (the `mock-soroban-rpc`
+ * service in docker-compose.yml). Any stable, clearly-fake number works: it only
+ * keeps the indexer's lag gauge and simulation validity window from reporting
+ * zero.
+ */
+const MOCK_LEDGER_SEQUENCE = 1_000_000;
 
 function getContractId(): string {
   return process.env.STREAM_CONTRACT_ID ?? '';
@@ -211,6 +232,7 @@ function getServer(): rpc.Server {
  * unreachable Soroban RPC endpoint can't hang the health check.
  */
 export async function checkRpcHealth(timeoutMs = 3_000): Promise<boolean> {
+  if (isMockMode()) return true;
   const now = Date.now();
   const ttlMs = getRpcHealthCacheTtlMs();
 
@@ -390,6 +412,9 @@ async function pollTransactionStatus(txHash: string): Promise<void> {
  * has a denominator even between indexer poll cycles.
  */
 export async function getLatestLedger(): Promise<number> {
+  if (isMockMode()) {
+    return MOCK_LEDGER_SEQUENCE;
+  }
   try {
     const response = await withRpcRetry('getLatestLedger', () =>
       withRpcTimeout('getLatestLedger', () => executeRpc('getLatestLedger', (server) => server.getLatestLedger())),
@@ -402,7 +427,9 @@ export async function getLatestLedger(): Promise<number> {
 }
 
 export async function getStreamFromChain(streamId: number): Promise<ChainStream | null> {
-  if (!getContractId()) return null;
+  // No contract exists in mock mode; the database projection is the only
+  // source of truth, so callers fall back to it instead of a chain read.
+  if (!getContractId() || isMockMode()) return null;
 
   try {
     const retval = await simulateContractCall('get_stream', [
@@ -434,7 +461,7 @@ export async function getStreamFromChain(streamId: number): Promise<ChainStream 
 }
 
 export async function getClaimableFromChain(streamId: bigint): Promise<string | null> {
-  if (!getContractId()) return null;
+  if (!getContractId() || isMockMode()) return null;
 
   try {
     const retval = await simulateContractCall('get_claimable_amount', [
@@ -457,12 +484,18 @@ export async function getClaimableFromChain(streamId: bigint): Promise<string | 
  * @returns Transaction hash of the cancellation transaction
  */
 export async function cancelStream(streamId: bigint, senderSecret: string): Promise<string> {
+  if (isMockMode()) {
+    return mockActionHash('cancel_stream', streamId);
+  }
   return submitContractCall('cancel_stream', [
     nativeToScVal(streamId, { type: 'u64' }),
   ], senderSecret);
 }
 
 export async function topUpStream(streamId: bigint, amount: bigint, callerAddress: string): Promise<string> {
+  if (isMockMode()) {
+    return mockActionHash('top_up_stream', streamId);
+  }
   const keeperSecret = getKeeperSecret();
   if (!keeperSecret) throw new Error('KEEPER_SECRET_KEY not configured');
   return submitContractCall('top_up_stream', [
@@ -490,6 +523,9 @@ export async function pauseStream(
   senderAddress: string,
   streamId: bigint
 ): Promise<PauseResumeResult> {
+  if (isMockMode()) {
+    return { txHash: mockActionHash('pause_stream', streamId) };
+  }
   if (!getContractId()) {
     throw new Error('Stream contract ID not configured');
   }
@@ -524,6 +560,9 @@ export async function resumeStream(
   senderAddress: string,
   streamId: bigint
 ): Promise<PauseResumeResult> {
+  if (isMockMode()) {
+    return { txHash: mockActionHash('resume_stream', streamId) };
+  }
   if (!getContractId()) {
     throw new Error('Stream contract ID not configured');
   }
@@ -557,6 +596,9 @@ export async function withdraw(
   streamId: bigint,
   recipientAddress: string,
 ): Promise<PauseResumeResult> {
+  if (isMockMode()) {
+    return { txHash: mockActionHash('withdraw', streamId) };
+  }
   if (!getContractId()) {
     throw new Error('Stream contract ID not configured');
   }
@@ -925,6 +967,21 @@ export async function simulateStreamAction(
   senderPublicKey: string,
   params: SimulateActionParams = {},
 ): Promise<StreamSimulationResult> {
+  if (isMockMode()) {
+    // No real footprint exists offline. The sandbox UI never signs this XDR —
+    // it routes writes through /v1/mock/actions — but returning a well-formed
+    // envelope keeps API clients from failing on a 503.
+    return {
+      unsignedXdr: '',
+      minResourceFee: '100',
+      recommendedFee: applyFeeBuffer('100'),
+      cpuInstructions: 0,
+      memoryBytes: 0,
+      expiresAtLedger: MOCK_LEDGER_SEQUENCE + SIMULATION_VALIDITY_LEDGERS,
+      simulatedReturn: '',
+    };
+  }
+
   const contractId = getContractId();
   if (!contractId) {
     throw new ApiError(503, 'Stream contract is not configured', 'contract_not_configured');

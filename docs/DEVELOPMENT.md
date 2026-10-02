@@ -55,11 +55,38 @@ All streams are distributed across 5 demo wallets you can use for UI testing:
 
 ### No wallet required
 
-Because the backend runs in **sandbox mode** and the Soroban RPC is mocked, you can:
+Because the backend runs in **mock mode** and the Soroban RPC is mocked, you can:
 
-- Browse all stream states and event histories without connecting a real Stellar wallet.
-- Test UI features (create, pause, cancel, withdraw flows) using the seeded data.
-- Trigger sandbox API calls via the Swagger UI at `/api-docs`.
+- Sign in from the wallet picker without a browser wallet — it lists the seeded accounts.
+- Browse all stream states and event histories.
+- Exercise the write flows (create, top up, pause, resume, withdraw, cancel) end to end.
+- Trigger the same actions via the Swagger UI at `/api-docs`.
+
+### Mock mode
+
+Mock mode is what makes the write flows work offline. It is enabled by
+`MOCK_MODE=true` on the backend and `NEXT_PUBLIC_MOCK_MODE=true` on the frontend
+(`npm run dev:mock` sets both), and it is **hard-disabled when
+`NODE_ENV=production`** — the `/v1/mock/*` router is not even mounted there.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/mock/users` | Lists the seeded accounts shown in the wallet picker |
+| `POST /v1/mock/auth` | Issues a sandbox JWT for one of them (no signature) |
+| `POST /v1/mock/actions` | Applies a stream action locally |
+
+`/v1/mock/actions` accepts `create_stream`, `top_up_stream`, `cancel_stream`,
+`withdraw`, `batch_withdraw`, `pause_stream` and `resume_stream`. It enforces the
+same ownership and state rules as the contract — only the sender may pause,
+resume, top up or cancel; only the recipient may withdraw; a cancelled stream is
+permanently inactive — while still writing the usual event rows and SSE
+broadcasts, so the UI updates exactly as it would against a live chain. Each
+action returns a deterministic 64-character placeholder transaction hash;
+nothing is broadcast to any network.
+
+In the frontend, mock mode intercepts the wallet layer: the wallet picker shows
+the seeded accounts instead of Freighter, and every action that would normally
+be signed and submitted to Soroban is routed to `/v1/mock/actions` instead.
 
 ### Stopping the sandbox
 
@@ -251,6 +278,7 @@ Configure in `.env`:
 
 * `STELLAR_NETWORK=testnet`
 * `SANDBOX_MODE_ENABLED=true` (optional)
+* `MOCK_MODE=true` (local sandbox only — see [Mock mode](#mock-mode))
 * `STELLAR_HORIZON_URL` (if needed)
 
 ---

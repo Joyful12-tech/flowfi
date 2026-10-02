@@ -384,7 +384,7 @@ jobs:
         if: matrix.language == 'rust'
         uses: Swatinem/rust-cache@v2
         with:
-          workspace: 'contracts -> target'
+          workspaces: 'contracts -> target'
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3

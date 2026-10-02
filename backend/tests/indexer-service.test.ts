@@ -106,6 +106,8 @@ const mockedPrisma = prisma as unknown as {
 const mockedWorker = sorobanEventWorker as unknown as {
   triggerPoll: ReturnType<typeof vi.fn>;
   processEvent: ReturnType<typeof vi.fn>;
+  // resetIndexer/replayFromLedger serialise through this mutex.
+  runExclusive: ReturnType<typeof vi.fn>;
 };
 
 /** Build a minimal but structurally valid Soroban EventResponse. */

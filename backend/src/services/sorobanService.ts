@@ -64,11 +64,18 @@ const RPC_MAX_RETRIES = Number(process.env.SOROBAN_RPC_MAX_RETRIES ?? 2);
 /** Base delay for exponential backoff between retries (doubles each attempt). */
 const RPC_RETRY_BASE_MS = Number(process.env.SOROBAN_RPC_RETRY_BASE_MS ?? 250);
 
-/** Bounded deadline for awaiting on-chain transaction finality (default 30s). */
-const TX_CONFIRMATION_TIMEOUT_MS = Number(process.env.SOROBAN_TX_CONFIRMATION_TIMEOUT_MS ?? 30_000);
+/**
+ * Bounded deadline for awaiting on-chain transaction finality (default 30s).
+ *
+ * Resolved per call rather than at module load so a runtime override (tests,
+ * or a config reload) takes effect without re-importing the module.
+ */
+const resolveTxConfirmationTimeoutMs = (): number =>
+  Number(process.env.SOROBAN_TX_CONFIRMATION_TIMEOUT_MS ?? 30_000);
 
 /** Polling interval when awaiting on-chain transaction finality (default 1s). */
-const TX_POLL_INTERVAL_MS = Number(process.env.SOROBAN_TX_POLL_INTERVAL_MS ?? 1_000);
+const resolveTxPollIntervalMs = (): number =>
+  Number(process.env.SOROBAN_TX_POLL_INTERVAL_MS ?? 1_000);
 
 const DEFAULT_RPC_HEALTH_CACHE_TTL_MS = 10_000;
 
@@ -376,24 +383,35 @@ export async function submitContractCall(method: string, args: xdr.ScVal[], send
 }
 
 /**
- * Poll until a submitted transaction reaches a terminal state (SUCCESS or FAILED).
- * Throws if the transaction fails or the confirmation timeout is exceeded.
+ * Poll until a submitted transaction reaches a terminal state and return the
+ * SUCCESS response. Throws when the transaction fails on-chain or the
+ * confirmation deadline passes without a terminal state.
  *
  * Exported for direct unit testing of the polling loop.
  */
-export async function pollTransactionStatus(txHash: string): Promise<void> {
-  const deadline = Date.now() + TX_CONFIRMATION_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const status = await withRpcTimeout('getTransaction', () =>
+export async function pollTransactionStatus(
+  txHash: string,
+  timeoutMs: number = resolveTxConfirmationTimeoutMs(),
+  pollIntervalMs: number = resolveTxPollIntervalMs(),
+): Promise<rpc.Api.GetTransactionResponse> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = (await withRpcTimeout('getTransaction', () =>
       executeRpc('getTransaction', (server) => server.getTransaction(txHash)),
-    );
-    if ((status as { status: string }).status === 'SUCCESS') return;
-    if ((status as { status: string }).status === 'FAILED') {
-      throw new Error(`Transaction ${txHash} failed on-chain`);
+    )) as rpc.Api.GetTransactionResponse;
+
+    if (status.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error(`Transaction failed on-chain: ${txHash}`);
     }
-    await new Promise((r) => setTimeout(r, TX_POLL_INTERVAL_MS));
+    if (status.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return status;
+    }
+
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
-  throw new Error(`Transaction ${txHash} not confirmed within ${TX_CONFIRMATION_TIMEOUT_MS}ms`);
+
+  throw new Error(`Transaction confirmation timed out after ${timeoutMs}ms: ${txHash}`);
 }
 
 /**

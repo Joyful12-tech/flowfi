@@ -157,27 +157,40 @@ jobs:
           install -m 0755 "$dest/trufflehog" /usr/local/bin/trufflehog
           trufflehog --version
 
-      # `--only-verified` restricts output to credentials the detector could
-      # confirm are live by calling the provider, and `--fail-verified` makes
-      # only those verified findings fail the build. Unverified candidates
-      # (test fixtures, example keys) therefore surface in the log without
-      # blocking every pull request.
       - name: Scan git history for verified secrets
         run: |
           set -uo pipefail
+
+          # --results=verified restricts output to credentials the detector
+          # could confirm are live by calling the issuing provider, and --fail
+          # exits 183 when any are found. Unverified candidates (test fixtures,
+          # documentation examples) are therefore neither reported nor blocking.
+          #
+          # There is no --fail-verified / --only-verified flag in TruffleHog
+          # v3.x. Passing one makes the binary abort before it scans anything,
+          # which failed this job in a few seconds.
           status=0
-          trufflehog git file://. --only-verified --fail-verified --json \
+          trufflehog git file://. \
+            --results=verified \
+            --fail \
+            --no-update \
+            --json \
             > trufflehog-results.json || status=$?
 
-          if [ "$status" -eq 0 ]; then
-            echo "✅ No verified secrets found in git history."
-          else
-            echo "❌ TruffleHog reported verified secrets (see results below and $GITHUB_STEP_SUMMARY)."
-          fi
-
-          # Preserve the non-zero exit so the job fails, but only after writing
-          # the report for the summary step to consume.
-          exit "$status"
+          case "$status" in
+            0)
+              echo "✅ No verified secrets found in git history."
+              ;;
+            183)
+              echo "::error::TruffleHog confirmed live credentials in the git history."
+              echo "Revoke the credential first, then purge it from history — see SECURITY.md."
+              exit 1
+              ;;
+            *)
+              echo "::error::TruffleHog scan failed (exit $status)."
+              exit "$status"
+              ;;
+          esac
 
       - name: Publish secret scan summary
         if: always()

@@ -134,7 +134,7 @@ gate that cries wolf gets ignored:
 - **cargo audit** has no severity model, so any RustSec advisory blocks.
 - **TruffleHog** blocks only on secrets it could **verify are live** by
   contacting the issuing provider. Unverified candidates (test fixtures,
-  documentation examples) appear in the log without failing the build.
+  documentation examples) are not reported and do not block a merge.
 - **Semgrep** blocks only on `error`-level findings from the curated
   [`.semgrep/flowfi.yml`](.semgrep/flowfi.yml) ruleset. Findings from the
   upstream `p/default` ruleset are uploaded to the Security tab for triage but
@@ -172,7 +172,7 @@ npm audit --omit=dev --audit-level=high
 cargo audit --manifest-path contracts/Cargo.toml
 
 # Secret scanning over the full history
-trufflehog git file://. --only-verified --fail-verified
+trufflehog git file://. --results=verified --fail
 ```
 
 If you add or change a rule, re-run it against the existing tree before opening

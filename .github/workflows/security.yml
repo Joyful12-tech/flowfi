@@ -130,11 +130,31 @@ jobs:
           # Do not leave the job token on disk where the scanner could read it.
           persist-credentials: false
 
+      # TruffleHog's own install.sh resolves the release tag through an
+      # *unauthenticated* GitHub API call, which rate-limits on shared runners
+      # — the same failure mode already documented in ci.yml when installing
+      # the Stellar CLI. Pull the release asset directly instead: it is served
+      # from the release CDN, needs no API token, and the published checksum is
+      # verified before the binary is trusted.
       - name: Install TruffleHog
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-            | sh -s -- -b /usr/local/bin v3.97.9
+
+          version=3.97.9
+          base="https://github.com/trufflesecurity/trufflehog/releases/download/v${version}"
+          asset="trufflehog_${version}_linux_amd64.tar.gz"
+          dest="${RUNNER_TEMP}/trufflehog"
+
+          mkdir -p "$dest"
+          curl -sSfL --retry 3 --retry-delay 2 \
+            "$base/trufflehog_${version}_checksums.txt" -o "$dest/checksums.txt"
+          curl -sSfL --retry 3 --retry-delay 2 \
+            "$base/$asset" -o "$dest/$asset"
+
+          ( cd "$dest" && grep "  $asset\$" checksums.txt | sha256sum -c - )
+
+          tar -xzf "$dest/$asset" -C "$dest" trufflehog
+          install -m 0755 "$dest/trufflehog" /usr/local/bin/trufflehog
           trufflehog --version
 
       # `--only-verified` restricts output to credentials the detector could

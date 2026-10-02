@@ -367,6 +367,22 @@ impl StreamContract {
         duration: u64,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
+        Self::create_stream_inner(env, sender, recipient, token_address, amount, duration)
+    }
+
+    /// Shared body of [`Self::create_stream`], minus the authorization step.
+    ///
+    /// `batch_create_streams` authorizes the sender once for the whole batch:
+    /// requiring auth again inside the same frame raises
+    /// `Error(Auth, ExistingValue)`, so the loop calls this instead.
+    fn create_stream_inner(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token_address: Address,
+        amount: i128,
+        duration: u64,
+    ) -> Result<u64, StreamError> {
         Self::require_not_protocol_paused(&env)?;
 
         if amount <= 0 {
@@ -528,6 +544,7 @@ impl StreamContract {
                 paused_at: None,
                 status: StreamStatus::Active,
                 schedule: VestingSchedule::StepTranches(steps),
+                cliff_time: None,
                 arbiter: None,
                 dispute_status: DisputeStatus::None,
                 is_allowance_based: false,
@@ -576,6 +593,31 @@ impl StreamContract {
         linear_duration: u64,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
+        Self::create_hybrid_cliff_stream_inner(
+            env,
+            sender,
+            recipient,
+            token_address,
+            amount,
+            cliff_time,
+            cliff_unlock_amount,
+            linear_duration,
+        )
+    }
+
+    /// Shared body of [`Self::create_hybrid_cliff_stream`], minus the
+    /// authorization step — see [`Self::create_stream_inner`].
+    #[allow(clippy::too_many_arguments)]
+    fn create_hybrid_cliff_stream_inner(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token_address: Address,
+        amount: i128,
+        cliff_time: u64,
+        cliff_unlock_amount: i128,
+        linear_duration: u64,
+    ) -> Result<u64, StreamError> {
         Self::require_not_protocol_paused(&env)?;
 
         if amount <= 0 {
@@ -625,6 +667,9 @@ impl StreamContract {
                 paused_at: None,
                 status: StreamStatus::Active,
                 schedule: VestingSchedule::HybridCliffLinear(cliff_time, cliff_unlock_amount),
+                // Mirrored on the record so the claimable projection can gate
+                // on the cliff without re-inspecting the schedule variant.
+                cliff_time: Some(cliff_time),
                 arbiter: None,
                 dispute_status: DisputeStatus::None,
                 is_allowance_based: false,
@@ -1400,7 +1445,9 @@ impl StreamContract {
 
             // Each stream is committed to storage before its own token transfer
             // (CEI), so a malicious token cannot re-enter against stale state.
-            Self::apply_withdrawal(&env, &mut stream, stream_id, &recipient, claimable, now);
+            // A failure here aborts the whole transaction, so there is no
+            // partial-withdrawal state to recover.
+            Self::apply_withdrawal(&env, &mut stream, stream_id, &recipient, claimable, now)?;
 
             let completed = stream.status == StreamStatus::Completed;
 
@@ -1683,12 +1730,15 @@ impl StreamContract {
         let start_time = env.ledger().timestamp();
 
         // Check allowance: just verify it's callable, don't lock it yet
-        let token_client = token::Client::new(&env, &token_address);
         // Try to get allowance to validate approval was made
         match env.try_invoke_contract::<i128, soroban_sdk::InvokeError>(
             &token_address,
             &Symbol::new(&env, "allowance"),
-            vec![&env, &sender, &env.current_contract_address()],
+            vec![
+                &env,
+                sender.to_val(),
+                env.current_contract_address().to_val(),
+            ],
         ) {
             Ok(Ok(allowance)) if allowance > 0 => {}
             _ => return Err(StreamError::AllowanceLocked),
@@ -1715,6 +1765,7 @@ impl StreamContract {
                 paused_at: None,
                 status: StreamStatus::Active,
                 schedule: VestingSchedule::Linear,
+                cliff_time: None,
                 arbiter: None,
                 dispute_status: DisputeStatus::None,
                 is_allowance_based: true,
@@ -1903,12 +1954,13 @@ impl StreamContract {
         if duration == 0 || cliff_duration >= duration {
             return Err(StreamError::InvalidDuration);
         }
+        sender.require_auth();
         let start_time = env.ledger().timestamp();
         let cliff_time = start_time + cliff_duration;
         // Cliff unlocks half the deposit; the rest drips over the remaining duration.
         let cliff_unlock_amount = amount / 2;
         let linear_duration = duration - cliff_duration;
-        Self::create_hybrid_cliff_stream(
+        Self::create_hybrid_cliff_stream_inner(
             env,
             sender,
             recipient,
@@ -1945,16 +1997,23 @@ impl StreamContract {
         let mut ids: Vec<u64> = Vec::new(&env);
         for input in inputs.iter() {
             let id = match input.cliff_duration {
-                Some(cliff_dur) => Self::create_stream_with_cliff(
-                    env.clone(),
-                    sender.clone(),
-                    input.recipient.clone(),
-                    input.token_address.clone(),
-                    input.amount,
-                    input.duration,
-                    cliff_dur,
-                )?,
-                None => Self::create_stream(
+                Some(cliff_dur) => {
+                    if input.duration == 0 || cliff_dur >= input.duration {
+                        return Err(StreamError::InvalidDuration);
+                    }
+                    let cliff_time = env.ledger().timestamp() + cliff_dur;
+                    Self::create_hybrid_cliff_stream_inner(
+                        env.clone(),
+                        sender.clone(),
+                        input.recipient.clone(),
+                        input.token_address.clone(),
+                        input.amount,
+                        cliff_time,
+                        input.amount / 2,
+                        input.duration - cliff_dur,
+                    )?
+                }
+                None => Self::create_stream_inner(
                     env.clone(),
                     sender.clone(),
                     input.recipient.clone(),
@@ -2050,7 +2109,9 @@ impl StreamContract {
     /// Time complexity: O(1).
     fn collect_fee(
         env: &Env,
-        token_address: &Address,
+        // The fee is computed locally from config, so the token is never
+        // touched here; the parameter is kept for call-site symmetry.
+        _token_address: &Address,
         amount: i128,
     ) -> Result<(i128, i128, Option<Address>), StreamError> {
         match try_load_config(env) {

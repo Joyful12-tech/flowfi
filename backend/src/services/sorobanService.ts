@@ -1,4 +1,4 @@
-import { rpc, xdr, StrKey, Contract, nativeToScVal, Keypair, TransactionBuilder, Networks, Account, Address } from '@stellar/stellar-sdk';
+import { rpc, xdr, StrKey, Contract, nativeToScVal, scValToNative, Keypair, TransactionBuilder, Networks, Account, Address } from '@stellar/stellar-sdk';
 import logger from '../logger.js';
 import { ApiError } from '../lib/api-error.js';
 import {
@@ -213,18 +213,7 @@ async function executeRpc<T>(label: string, operation: (server: rpc.Server) => P
   return rpcPool.execute(label, (server, _signal) => operation(server));
 }
 
-/** Returns the active test server or falls back to the pool (alias for executeRpc convenience). */
-function getServer(): rpc.Server {
-  if (_server) return _server;
-  // Return a proxy-like object that routes each call through the pool.
-  // This allows existing `getServer().method()` call sites to work without refactoring.
-  return new Proxy({} as rpc.Server, {
-    get(_target, prop: string) {
-      return (...args: unknown[]) =>
-        rpcPool.execute(prop, (server) => (server as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[prop]?.(...args) as Promise<unknown>);
-    },
-  });
-}
+
 
 /**
  * Lightweight connectivity check used by the /health endpoint.
@@ -389,8 +378,10 @@ export async function submitContractCall(method: string, args: xdr.ScVal[], send
 /**
  * Poll until a submitted transaction reaches a terminal state (SUCCESS or FAILED).
  * Throws if the transaction fails or the confirmation timeout is exceeded.
+ *
+ * Exported for direct unit testing of the polling loop.
  */
-async function pollTransactionStatus(txHash: string): Promise<void> {
+export async function pollTransactionStatus(txHash: string): Promise<void> {
   const deadline = Date.now() + TX_CONFIRMATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const status = await withRpcTimeout('getTransaction', () =>
@@ -426,14 +417,19 @@ export async function getLatestLedger(): Promise<number> {
   }
 }
 
-export async function getStreamFromChain(streamId: number): Promise<ChainStream | null> {
+export async function getStreamFromChain(streamId: bigint | number): Promise<ChainStream | null> {
   // No contract exists in mock mode; the database projection is the only
   // source of truth, so callers fall back to it instead of a chain read.
   if (!getContractId() || isMockMode()) return null;
 
+  // Stream ids are u64 on chain; callers hold them as bigint (Prisma BigInt)
+  // or as a parsed number, so normalise before building the ScVal and again
+  // when echoing the id back in the ChainStream shape.
+  const onChainId = BigInt(streamId);
+
   try {
     const retval = await simulateContractCall('get_stream', [
-      nativeToScVal(streamId, { type: 'u64' }),
+      nativeToScVal(onChainId, { type: 'u64' }),
     ]);
 
     const fields = decodeMap(retval);
@@ -444,7 +440,7 @@ export async function getStreamFromChain(streamId: number): Promise<ChainStream 
       isActiveVal.b === true;
 
     return {
-      streamId,
+      streamId: onChainId,
       sender: decodeAddress(fields['sender']!),
       recipient: decodeAddress(fields['recipient']!),
       tokenAddress: decodeAddress(fields['token_address']!),
@@ -908,11 +904,13 @@ function readResourceFootprint(
   transactionData: rpc.Api.SimulateTransactionSuccessResponse['transactionData'],
 ): { cpuInstructions: number; memoryBytes: number } {
   try {
+    // stellar-sdk v17 models XDR structs as classes with readonly properties,
+    // so `resources` / `instructions` / `writeBytes` are fields, not accessors.
     const data = transactionData.build();
-    const resources = data.resources();
+    const resources = data.resources;
     return {
-      cpuInstructions: Number(resources.instructions()),
-      memoryBytes: Number(resources.writeBytes()),
+      cpuInstructions: Number(resources.instructions),
+      memoryBytes: Number(resources.writeBytes),
     };
   } catch (err) {
     logger.warn('[SorobanService] Could not read resource footprint from simulation:', err);
@@ -920,32 +918,25 @@ function readResourceFootprint(
   }
 }
 
-/** Render a simulated ScVal return as a decimal string ('' for void returns). */
+/**
+ * Render a simulated ScVal return as a decimal string ('' for void returns).
+ *
+ * Uses `scValToNative` rather than decoding the union by hand: in stellar-sdk
+ * v17 the ScVal variants are classes behind a single type, so the previous
+ * `retval.switch()` / `retval.u64()` accessors no longer exist. Native ints and
+ * bigints are rendered as decimals; everything else (addresses, maps, void
+ * markers) falls back to base64 XDR so a client can still decode it.
+ */
 function decodeSimulatedReturn(result: rpc.Api.SimulateTransactionSuccessResponse): string {
   const retval = result.result?.retval;
   if (!retval) return '';
 
   try {
-    switch (retval.switch().value) {
-      case xdr.ScValType.scvI128().value:
-        return decodeI128(retval);
-      case xdr.ScValType.scvU64().value:
-        return retval.u64().toString();
-      case xdr.ScValType.scvU32().value:
-        return retval.u32().toString();
-      case xdr.ScValType.scvI64().value:
-        return retval.i64().toString();
-      case xdr.ScValType.scvU128().value: {
-        const parts = retval.u128();
-        const hi = BigInt.asUintN(64, BigInt(parts.hi().toString()));
-        const lo = BigInt.asUintN(64, BigInt(parts.lo().toString()));
-        return ((hi << 64n) | lo).toString();
-      }
-      default:
-        // Non-numeric returns (addresses, maps, void markers) are surfaced as
-        // base64 XDR so the client can decode them with the SDK if it needs to.
-        return Buffer.from(retval.toXDR()).toString('base64');
+    const native = scValToNative(retval);
+    if (typeof native === 'bigint' || typeof native === 'number') {
+      return native.toString();
     }
+    return Buffer.from(retval.toXDR()).toString('base64');
   } catch {
     return '';
   }

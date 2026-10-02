@@ -12,7 +12,10 @@ if (!globalForPrisma.pool) {
   globalForPrisma.pool = createPgPool();
 }
 
-const adapter = new PrismaPg(globalForPrisma.pool as Parameters<typeof PrismaPg>[0]);
+// PrismaPg accepts a pg.Pool directly; the `pg` copy resolved here can differ
+// from the adapter's own, which is harmless at runtime because the adapter only
+// duck-types the pool it is handed.
+const adapter = new PrismaPg(globalForPrisma.pool);
 
 export const prisma =
   globalForPrisma.prisma ||

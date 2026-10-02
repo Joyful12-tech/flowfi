@@ -141,7 +141,7 @@ export function deserializeDeadLetterPayload(payload: string): rpc.Api.EventResp
 }
 
 /** Best-effort event-type label used for dedup and operator filtering. */
-function eventTypeOf(event: rpc.Api.EventResponse): string {
+export function eventTypeOf(event: rpc.Api.EventResponse): string {
   const topic0 = event.topic?.[0];
   if (!topic0) return 'unknown';
   try {

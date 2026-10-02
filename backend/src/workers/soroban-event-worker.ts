@@ -3,7 +3,12 @@ import { rpc, xdr, StrKey } from "@stellar/stellar-sdk";
 import { prisma } from "../lib/prisma.js";
 import { INDEXER_STATE_ID, ensureIndexerState } from "../lib/indexer-state.js";
 import { sseService } from "../services/sse.service.js";
-import { publishIndexerLag, quarantineEvent } from "../services/indexerService.js";
+import {
+  publishIndexerLag,
+  quarantineEvent,
+  eventTypeOf,
+  serializeDeadLetterPayload,
+} from "../services/indexerService.js";
 import {
   indexerEventsProcessedTotal,
   indexerPollsTotal,
@@ -469,12 +474,16 @@ export class SorobanEventWorker {
   ): Promise<boolean> {
     try {
       const row = await prisma.indexerDeadLetterEvent.upsert({
-        where: { eventId: event.id },
+        where: {
+          eventId_eventType: { eventId: event.id, eventType: eventTypeOf(event) },
+        },
         create: {
           eventId: event.id,
-          ledger: event.ledger,
-          transactionHash: event.txHash,
-          rawPayload: JSON.stringify(event),
+          eventType: eventTypeOf(event),
+          txHash: event.txHash,
+          ledgerSequence: event.ledger,
+          cursor: null,
+          payload: serializeDeadLetterPayload(event),
           errorMessage: err instanceof Error ? err.message : String(err),
           attempts: 1,
           lastAttemptAt: new Date(),

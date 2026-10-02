@@ -47,10 +47,12 @@ export function WalletModal({ onClose }: WalletModalProps) {
 
   // Sandbox accounts come from the backend so the picker always lists exactly
   // the users the seed script created.
+  const mockAccountsCancelled = React.useRef(false);
+
   useEffect(() => {
     if (!MOCK_MODE) return;
 
-    const cancelled = React.useRef(false);
+    const cancelled = mockAccountsCancelled;
     fetchMockAccounts()
       .then((accounts) => {
         if (!cancelled.current) setMockAccounts(accounts);

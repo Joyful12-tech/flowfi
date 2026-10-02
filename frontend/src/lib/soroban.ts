@@ -389,10 +389,11 @@ export async function batchWithdrawFromStreams(
   session: WalletSession,
   params: BatchWithdrawParams,
 ): Promise<SorobanResult> {
-  const { nativeToScVal } = await import("@stellar/stellar-sdk");
-  return freighterCall(session.publicKey, "batch_withdraw", [
-    nativeToScVal(params.streamIds, { type: "vec" }),
-  ]);
+  const { xdr } = await import("@stellar/stellar-sdk");
+  // stellar-sdk v17 has no nativeToScVal({type:"vec"}) spec, so build the ScVal
+  // vector directly from its u64 elements.
+  const streamIds = xdr.ScVal.scvVec(params.streamIds.map((id) => xdr.ScVal.scvU64(id)));
+  return freighterCall(session.publicKey, "batch_withdraw", [streamIds]);
 }
 
 export async function pauseStream(

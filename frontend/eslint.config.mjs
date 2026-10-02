@@ -20,6 +20,17 @@ const eslintConfig = defineConfig([
       // Next.js manages the React import; suppress the no-unused-vars for it
       "react/react-in-jsx-scope": "off",
       "react/prop-types": "off",
+      // Honour the TypeScript convention that a leading underscore marks a
+      // deliberately unused binding (e.g. an accepted-but-unrendered prop).
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          ignoreRestSiblings: true,
+        },
+      ],
     },
     settings: {
       react: {

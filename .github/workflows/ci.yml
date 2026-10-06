@@ -286,26 +286,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Optimize WASM files
+        # `stellar contract build` must run inside the cargo workspace, and
+        # recent CLI releases build for wasm32v1-none (optimized by default)
+        # rather than wasm32-unknown-unknown, so locate the output instead of
+        # assuming a directory.
+        working-directory: contracts
         run: |
           set -euo pipefail
 
-          # Target the precise release build directory
-          RELEASE_DIR="contracts/target/wasm32-unknown-unknown/release"
+          rustup target add wasm32v1-none
+          stellar contract build --optimize
 
-          # Use your strict selection logic to target un-optimized raw binaries only
-          WASMS=$(find "$RELEASE_DIR" -maxdepth 1 -type f -name "*.wasm" ! -name "*.optimized.wasm")
+          RELEASE_DIR="target/wasm32-unknown-unknown/release"
+          mkdir -p "$RELEASE_DIR"
 
-          if [ -z "$WASMS" ]; then
-            echo "Error: No raw WASM files found in $RELEASE_DIR"
+          src=""
+          for dir in target/wasm32v1-none/release target/wasm32-unknown-unknown/release; do
+            if [ -f "$dir/stream_contract.wasm" ]; then
+              src="$dir/stream_contract.wasm"
+              break
+            fi
+          done
+
+          if [ -z "$src" ]; then
+            echo "Error: stream_contract.wasm not found after stellar contract build"
             exit 1
           fi
 
-          for w in $WASMS; do
-            filename=$(basename "$w")
-            out="$RELEASE_DIR/${filename%.wasm}.optimized.wasm"
-            echo "Optimizing $filename -> $(basename "$out")"
-            stellar contract optimize --wasm "$w" --wasm-out "$out"
-          done
+          out="$RELEASE_DIR/stream_contract.optimized.wasm"
+          echo "Optimized $src -> $out"
+          cp "$src" "$out"
         shell: bash
 
       - name: Check WASM size budget

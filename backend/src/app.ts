@@ -11,7 +11,7 @@ import {
   type VersionedRequest,
 } from "./middleware/api-version.middleware.js";
 import { sandboxMiddleware } from "./middleware/sandbox.middleware.js";
-import { globalRateLimiter } from "./middleware/rate-limiter.middleware.js";
+import { globalRateLimiter, healthRateLimiter } from "./middleware/rate-limiter.middleware.js";
 import { metricsMiddleware } from "./middleware/metrics.middleware.js";
 import { requestIdMiddleware } from "./middleware/requestId.js";
 import v1Routes from "./routes/v1/index.js";
@@ -95,7 +95,26 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   }
   next(err);
 });
-app.use(express.json({ limit: "1mb" }));
+// JSON body parsing.
+//
+// Standard REST endpoints get a tight 100kb ceiling so a multi-megabyte body
+// cannot pin memory or stall the event loop. The bulk routes that legitimately
+// carry many records (batch stream creation, CSV payroll import, and the
+// batch-withdraw simulation payload) get 1mb instead.
+//
+// The larger parser MUST be registered first: Express runs middleware in
+// registration order, so a request that reaches the 100kb parser first can
+// never be rescued by the larger one further down the chain.
+const BULK_JSON_PATHS = [
+  "/v1/streams/batch",
+  "/v1/streams/import",
+  "/v1/payroll/import",
+  // `/v1/streams/simulate` accepts `batch_withdraw`, whose `streamIds` array can
+  // be large for payroll recipients.
+  "/v1/streams/simulate",
+];
+app.use(BULK_JSON_PATHS, express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "100kb" }));
 
 // Sandbox mode detection (before versioning)
 app.use(sandboxMiddleware);
@@ -141,7 +160,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Health check routes
-app.use("/health", healthRoutes);
+app.use("/health", healthRateLimiter, healthRoutes);
 
 // Prometheus scrape endpoint. Mounted after the metrics middleware so scrapes
 // are themselves counted, and outside the versioned API surface because

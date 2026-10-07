@@ -8,41 +8,47 @@ import { sorobanEventWorker } from '../workers/soroban-event-worker.js';
 
 const router = Router();
 
+interface CachedHealth {
+  status: number;
+  body: unknown;
+  expiresAt: number;
+}
+let _healthCache: CachedHealth | null = null;
+// 2s cache (issue #1511). Disabled under NODE_ENV=test unless HEALTH_CACHE_MS is set.
+const HEALTH_CACHE_MS = Number(
+  process.env.HEALTH_CACHE_MS ?? (process.env.NODE_ENV === 'test' ? 0 : 2_000),
+);
+
+/** Clears the cached health result (used by tests). */
+export function resetHealthCache(): void {
+  _healthCache = null;
+}
+
 /**
  * @openapi
  * /health:
  *   get:
- *     tags:
- *       - Health
+ *     tags: [Health]
  *     summary: Detailed health check
  *     description: |
- *       Returns liveness and readiness information.
- *       **Liveness** (200 vs 503) is determined by DB reachability alone.
- *       **Indexer lag** is reported in the body for observability but only
- *       forces a 503 when the indexer is actually enabled
- *       (`STREAM_CONTRACT_ID` env var set) and its state row is stale
- *       (lag > 60 s). A cold-started instance with no state row yet, or a
- *       deployment with the indexer intentionally disabled, always returns 200
- *       as long as the DB is reachable.
- *       **Event-processing failures** are also reported. When the indexer is
- *       enabled and recent per-event failures spike (≥50% of attempts in the
- *       last 5 minutes, with ≥3 samples), the endpoint returns 503 even if
- *       lag looks healthy (the IndexerState upsert bumps updatedAt every poll).
+ *       Returns liveness and readiness information. Liveness (200 vs 503) is
+ *       determined by DB reachability alone. Indexer lag is reported in the
+ *       body for observability but only forces a 503 when the indexer is
+ *       actually enabled (`STREAM_CONTRACT_ID` env var set) and its state row
+ *       is stale (lag > 60 s), or when recent event-processing failures spike.
+ *       Response is cached in-memory for 2 s so consecutive rapid requests do
+ *       not re-execute the DB and Redis probes (issue #1511).
  *     responses:
- *       200:
- *         description: Service is healthy
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/HealthResponse'
- *       503:
- *         description: Service is degraded or unhealthy
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/HealthResponse'
+ *       200: { description: Service is healthy }
+ *       503: { description: Service is degraded or unhealthy }
+ *       429: { description: Rate limited }
  */
 router.get('/', async (_req: Request, res: Response) => {
+  if (_healthCache && _healthCache.expiresAt > Date.now()) {
+    res.status(_healthCache.status).json(_healthCache.body);
+    return;
+  }
+
   let dbStatus = 'connected';
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -50,7 +56,6 @@ router.get('/', async (_req: Request, res: Response) => {
     dbStatus = 'disconnected';
   }
 
-  // Whether the event-indexer is configured (STREAM_CONTRACT_ID must be set for it to run).
   const indexerEnabled = !!process.env.STREAM_CONTRACT_ID;
 
   let indexerLag = -1;
@@ -58,17 +63,14 @@ router.get('/', async (_req: Request, res: Response) => {
   try {
     state = await prisma.indexerState.findUnique({ where: { id: INDEXER_STATE_ID } });
     if (state) {
-      const now = Math.floor(Date.now() / 1000);
+      const nowSec = Math.floor(Date.now() / 1000);
       const updatedAt = Math.floor(state.updatedAt.getTime() / 1000);
-      indexerLag = Math.max(0, now - updatedAt);
+      indexerLag = Math.max(0, nowSec - updatedAt);
     }
-    // indexerLag === -1 means no state row yet (cold start) — not an error.
   } catch {
     indexerLag = -1;
   }
 
-  // Resolve the network tip so ledger lag is reportable without waiting for the
-  // next indexer poll. Failure is non-fatal: lag degrades to null.
   let networkLedger = 0;
   if (indexerEnabled) {
     try {
@@ -100,16 +102,14 @@ router.get('/', async (_req: Request, res: Response) => {
 
   // 503 when: DB is down, OR the indexer is enabled and its state row is stale
   // (lag > 60), OR recent event-processing failures are spiking. A missing state
-  // row (lag === -1) is a cold-start condition, not a failure, even when the
-  // indexer is enabled.
+  // row (lag === -1) is a cold-start condition, not a failure.
   const indexerLagDegraded = indexerEnabled && indexerLag > 60;
   const indexerFailureDegraded = indexerEnabled && eventCounters.degraded;
   const isHealthy =
     dbStatus === 'connected' && !indexerLagDegraded && !indexerFailureDegraded;
   const status = isHealthy ? 'ok' : 'degraded';
 
-  // Redis is optional (single-instance SSE mode falls back gracefully when it's
-  // absent), so its status never affects the top-level `isHealthy` verdict.
+  // Redis is optional, so its status never affects the top-level verdict.
   const redisConfigured = !!process.env.REDIS_URL;
   const redisStatus = !redisConfigured
     ? 'not_configured'
@@ -117,15 +117,12 @@ router.get('/', async (_req: Request, res: Response) => {
       ? 'ok'
       : 'unavailable';
 
-  // Soroban RPC reachability is reported for observability only — it does not
-  // gate liveness, since a transient RPC blip shouldn't take the service down.
+  // RPC reachability is observability only; it does not gate liveness.
   const sorobanRpcOk = await checkRpcHealth();
 
-  // Keep the Prometheus gauges in step with what /health reports, so a scrape
-  // taken between poll cycles still reflects the ledger the indexer reached.
   setIndexerLedgers(state?.lastLedger ?? 0, networkLedger);
 
-  res.status(isHealthy ? 200 : 503).json({
+  const responseBody = {
     status,
     db: dbStatus,
     indexerEnabled,
@@ -138,19 +135,16 @@ router.get('/', async (_req: Request, res: Response) => {
     eventsFailed: eventCounters.eventsFailed,
     lastErrorAt: eventCounters.lastErrorAt,
     indexerDegraded: eventCounters.degraded,
-    // Ledger-level lag, which is what `flowfi_indexer_lag_ledgers` tracks.
-    // Null when the network tip could not be resolved.
     indexerLedgerLag:
       networkLedger > 0 ? Math.max(0, networkLedger - (state?.lastLedger ?? 0)) : null,
     uptime: process.uptime(),
     checks: {
-      database: {
-        status: dbStatus === 'connected' ? 'ok' : 'down',
-      },
+      database: { status: dbStatus === 'connected' ? 'ok' : 'down' },
       indexer: {
         status: !indexerEnabled
           ? 'disabled'
           : indexerLagDegraded || indexerFailureDegraded
+          : indexerFailureDegraded || indexerLagDegraded
             ? 'degraded'
             : 'ok',
         enabled: indexerEnabled,
@@ -166,8 +160,16 @@ router.get('/', async (_req: Request, res: Response) => {
       sorobanRpc: {
         status: 'unknown',
       },
+      redis: { status: redisStatus },
+      sorobanRpc: { status: sorobanRpcOk ? 'ok' : 'down' },
     },
-  });
+  };
+
+  const httpStatus = isHealthy ? 200 : 503;
+  if (HEALTH_CACHE_MS > 0) {
+    _healthCache = { status: httpStatus, body: responseBody, expiresAt: Date.now() + HEALTH_CACHE_MS };
+  }
+  res.status(httpStatus).json(responseBody);
 });
 
 export default router;

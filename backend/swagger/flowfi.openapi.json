@@ -910,27 +910,16 @@
           "Health"
         ],
         "summary": "Detailed health check",
-        "description": "Returns liveness and readiness information.\n**Liveness** (200 vs 503) is determined by DB reachability alone.\n**Indexer lag** is reported in the body for observability but only\nforces a 503 when the indexer is actually enabled\n(`STREAM_CONTRACT_ID` env var set) and its state row is stale\n(lag > 60 s). A cold-started instance with no state row yet, or a\ndeployment with the indexer intentionally disabled, always returns 200\nas long as the DB is reachable.\n**Event-processing failures** are also reported. When the indexer is\nenabled and recent per-event failures spike (≥50% of attempts in the\nlast 5 minutes, with ≥3 samples), the endpoint returns 503 even if\nlag looks healthy (the IndexerState upsert bumps updatedAt every poll).\n",
+        "description": "Returns liveness and readiness information. Liveness (200 vs 503) is\ndetermined by DB reachability alone. Indexer lag is reported in the\nbody for observability but only forces a 503 when the indexer is\nactually enabled (`STREAM_CONTRACT_ID` env var set) and its state row\nis stale (lag > 60 s), or when recent event-processing failures spike.\nResponse is cached in-memory for 2 s so consecutive rapid requests do\nnot re-execute the DB and Redis probes (issue #1511).\n",
         "responses": {
           "200": {
-            "description": "Service is healthy",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
-                }
-              }
-            }
+            "description": "Service is healthy"
+          },
+          "429": {
+            "description": "Rate limited"
           },
           "503": {
-            "description": "Service is degraded or unhealthy",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
-                }
-              }
-            }
+            "description": "Service is degraded or unhealthy"
           }
         }
       }

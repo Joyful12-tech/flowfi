@@ -11,6 +11,13 @@ export type {
   StreamResult,
   WithdrawResult,
   SubmitResult,
+  StreamStatus,
+  VestingSchedule,
+  VestingStep,
+} from './types.js';
+export {
+  isStreamStatus,
+  isVestingSchedule,
 } from './types.js';
 export {
   buildContractCallXdr,
@@ -25,3 +32,11 @@ export {
 } from './builder.js';
 export type { Signer } from './signers/index.js';
 export { CustomSigner, KeypairSigner, FreighterSigner } from './signers/index.js';
+
+export {
+  pollTransactionWithRetry,
+  pollUntil,
+  isRetryableError,
+  PollRetryExhaustedError,
+} from './retry.js';
+export type { PollRetryOptions } from './retry.js';

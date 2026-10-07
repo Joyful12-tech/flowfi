@@ -107,18 +107,13 @@ export interface paths {
         };
         /**
          * Detailed health check
-         * @description Returns liveness and readiness information.
-         *     **Liveness** (200 vs 503) is determined by DB reachability alone.
-         *     **Indexer lag** is reported in the body for observability but only
-         *     forces a 503 when the indexer is actually enabled
-         *     (`STREAM_CONTRACT_ID` env var set) and its state row is stale
-         *     (lag > 60 s). A cold-started instance with no state row yet, or a
-         *     deployment with the indexer intentionally disabled, always returns 200
-         *     as long as the DB is reachable.
-         *     **Event-processing failures** are also reported. When the indexer is
-         *     enabled and recent per-event failures spike (≥50% of attempts in the
-         *     last 5 minutes, with ≥3 samples), the endpoint returns 503 even if
-         *     lag looks healthy (the IndexerState upsert bumps updatedAt every poll).
+         * @description Returns liveness and readiness information. Liveness (200 vs 503) is
+         *     determined by DB reachability alone. Indexer lag is reported in the
+         *     body for observability but only forces a 503 when the indexer is
+         *     actually enabled (`STREAM_CONTRACT_ID` env var set) and its state row
+         *     is stale (lag > 60 s), or when recent event-processing failures spike.
+         *     Response is cached in-memory for 2 s so consecutive rapid requests do
+         *     not re-execute the DB and Redis probes (issue #1511).
          */
         get: {
             parameters: {
@@ -134,18 +129,21 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content: {
-                        "application/json": components["schemas"]["HealthResponse"];
+                    content?: never;
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
                     };
+                    content?: never;
                 };
                 /** @description Service is degraded or unhealthy */
                 503: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content: {
-                        "application/json": components["schemas"]["HealthResponse"];
-                    };
+                    content?: never;
                 };
             };
         };

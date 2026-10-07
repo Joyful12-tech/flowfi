@@ -670,6 +670,7 @@ export function DashboardView({ session, onDisconnect }: DashboardViewProps) {
     connected,
     reconnecting,
     error,
+    retryNow,
   } = useStreamEvents({
     userPublicKeys: [session.publicKey],
     autoReconnect: true,
@@ -1026,6 +1027,7 @@ export function DashboardView({ session, onDisconnect }: DashboardViewProps) {
               connected={connected}
               reconnecting={reconnecting}
               error={error}
+              onRetry={retryNow}
             />
             <Button onClick={() => setShowWizard(true)} glow>
               Create Stream
